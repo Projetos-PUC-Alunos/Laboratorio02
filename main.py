@@ -2,6 +2,7 @@ from graphqlclient import GraphQLClient
 import pandas as pd
 import json
 import time
+import os
 
 API = 'https://api.github.com/graphql'
 TOKEN = 'token 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'
@@ -64,3 +65,24 @@ df.columns = ['ID',
 
 # Salva o dataframe em um arquivo CSV
 df.to_csv('repositorios.csv', sep=';', index=False)
+
+# -------------------------------------------------------------------------------------------------------------------------------- #
+
+
+# Caminho do arquivo CSV
+caminho_arquivo = 'C:/Users/Jully K/Documents/projects/Laboratorio02/repositorios.csv'
+
+# Pasta onde o repositório será clonado
+caminho_destino = '../'
+
+# Lê o arquivo CSV usando o Pandas
+dataframe = pd.read_csv(caminho_arquivo, delimiter=';')
+
+# Loop através de cada linha do dataframe
+for indice, linha in dataframe.iterrows():
+    # Extrai a coluna "url" da linha atual
+    url = linha['URL']
+    print(url)
+
+    # Clona o repositório com base na URL usando o comando git clone
+    os.system('git clone ' + url + '.git ' + caminho_destino)
