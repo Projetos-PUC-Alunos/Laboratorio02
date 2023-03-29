@@ -1,88 +1,136 @@
-from graphqlclient import GraphQLClient
-import pandas as pd
-import json
-import time
+import os, shutil, subprocess
+from datetime import datetime as dt
+import multiprocessing as mul
 import os
+import stat
+from subprocess import call
 
-API = 'https://api.github.com/graphql'
-TOKEN = 'token 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'
+import pandas as pd
+from git import Repo
 
-args ={'after': None}
+from data.query_repo import generate_repo_csv
 
-query =  """
-    query ($after: String) {
-  search(query: "stars:>100 language:Java", type: REPOSITORY, first: 10, after: $after) {
-    pageInfo {
-      hasPreviousPage
-      hasNextPage
-      startCursor
-      endCursor
-    }
-    edges {
-      node {
-        ... on Repository {
-          id
-          url
-          name
-          nameWithOwner
-          stargazerCount
-          createdAt
-        }
-      }
-    }
-  }
-}
-    """
+NUM_REPO = 1200
+
+REPOS_FOLDER = 'data/repos/'
+METRICS_FOLDER = 'data/ck_metrics/'
+OUTPUT_FOLDER = 'output/'
+
+CK_RUNNER = 'data/Runner.jar'
+INPUT_FILE = 'data/repositories.csv'
+OUTPUT = 'output/analysis.csv'
+
+COLUMNS = ['nameWithOwner', 'url', 'createdAt', 'stargazers',
+            'releases', 'loc', 'cbo', 'dit', 'lcom']
 
 
+def log_print(message):
+    now = dt.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f'{now} - {message}')
 
-client = GraphQLClient(API)
-client.inject_token(TOKEN)
 
-df = pd.DataFrame()
+def already_processed(nameWithOwner: str) -> bool:
+    if os.path.exists(OUTPUT):
+        df = pd.read_csv(OUTPUT)
+        return nameWithOwner in df['nameWithOwner'].values
+    return False
 
-for i in range(100):
-    response = json.loads(client.execute(query= query, variables=args))
-    print(response)
-    args['after'] = response['data']['search']['pageInfo']['endCursor']
+def on_rm_error(func, path, exc_info):
+    os.chmod(path, stat.S_IWRITE)
+    os.unlink(path)
 
-    data = response['data']['search']['edges']
-    df = pd.concat([df, pd.json_normalize(data)], ignore_index=True)
 
-    time.sleep(1)
+def delete_cached_repos(repo_name: str):
+    try:
+        if os.path.exists(REPOS_FOLDER + repo_name):
+
+            for i in os.listdir(REPOS_FOLDER + repo_name):
+                if i.endswith('git') or i.endswith('github'):
+                    tmp = os.path.join(REPOS_FOLDER + repo_name, i)
+                    # We want to unhide the .git folder before unlinking it.
+                    while True:
+                        call(['attrib', '-H', tmp])
+                        break
+                    shutil.rmtree(tmp, onerror=on_rm_error)
+            shutil.rmtree(REPOS_FOLDER + repo_name) 
+
+        if os.path.exists(METRICS_FOLDER + repo_name + 'class.csv'):
+            os.remove(METRICS_FOLDER + repo_name + 'class.csv')
+        if os.path.exists(METRICS_FOLDER + repo_name + 'method.csv'):
+            os.remove(METRICS_FOLDER + repo_name + 'method.csv')
+    except Exception as e:
+        log_print(e)
+        log_print(f'Error on exclude {repo_name} =/ ')
+
+
+def run_ck_metrics(nameWithOwner: str, url: str, created_at: str, stargazers: int, releases: int) -> None:
+    try:
+        repo_name = nameWithOwner.replace('/', '@')
+        delete_cached_repos(repo_name)
+
+        # Assert that the repository isn't already in the output
+        if not os.path.exists(f'{OUTPUT_FOLDER}{repo_name}.csv') and not already_processed(nameWithOwner):
+            repo_path = REPOS_FOLDER + repo_name
+            ck_metrics_path = METRICS_FOLDER + repo_name
+
+            log_print(f'Cloning {nameWithOwner}')
+            Repo.clone_from(url, repo_path, depth=1, filter='blob:none')
+
+            log_print(f'Running CK metrics on {repo_name}')
+            subprocess.call(["java", "-jar", CK_RUNNER, repo_path, "true", "0", "False", ck_metrics_path])
+
+            metrics = pd.read_csv(ck_metrics_path + 'class.csv')
+            loc = metrics['loc'].sum()
+            cbo = metrics['cbo'].median()
+            dit = metrics['dit'].max()
+            lcom = metrics['lcom'].median()
+
+            df = pd.DataFrame([[nameWithOwner, url, created_at, stargazers,
+                releases, loc, cbo, dit, lcom]], columns=COLUMNS)
+            df.to_csv(OUTPUT_FOLDER + repo_name + '.csv', index=False)
+
+            shutil.rmtree(repo_path)
+            os.remove(ck_metrics_path + 'class.csv')
+            os.remove(ck_metrics_path + 'method.csv')
+
+            return df
     
+    except Exception as e:
+        log_print(f'Error on {nameWithOwner}: {e}')
+        delete_cached_repos(repo_name)
 
 
-# Renomeia as colunas do dataframe
-df.columns = ['ID',
-              'URL',
-              'Name',
-              'nameWithOwner',
-              'Stargazers',
-              'createdAt']
+if __name__ == '__main__':
+    rp_list = pd.DataFrame()
 
-# df = df.drop(df.columns[-1], axis=1)
+    # Create folders if they don't exist
+    if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
+    if not os.path.exists(REPOS_FOLDER): os.makedirs(REPOS_FOLDER)
+    if not os.path.exists(METRICS_FOLDER): os.makedirs(METRICS_FOLDER)
 
-# Salva o dataframe em um arquivo CSV
-df.to_csv('repositorios.csv', sep=';', index=False)
+    rp_list = pd.read_csv(INPUT_FILE)
 
-# -------------------------------------------------------------------------------------------------------------------------------- #
+    rp_list = rp_list.sort_values(by='stargazers', ascending=False)[:int(NUM_REPO*1.25)]
+
+    pool = mul.Pool(int(os.cpu_count())*3)
 
 
-# Caminho do arquivo CSV
-caminho_arquivo = 'C:/Users/Jully K/Documents/projects/Laboratorio02/repositorios.csv'
+    rp_list = pd.read_csv(INPUT_FILE)
 
-# Pasta onde o repositório será clonado
-caminho_destino = '../'
+    rows = list(rp_list.itertuples(name=None, index=False))
+    results = pool.starmap(run_ck_metrics, rows)
+    results = list(filter(lambda x: x is not None, results))
 
-# Lê o arquivo CSV usando o Pandas
-dataframe = pd.read_csv(caminho_arquivo, delimiter=';')
+    output = pd.concat(results) if len(results) > 0 else pd.DataFrame(columns=COLUMNS)
+    if os.path.exists(OUTPUT):
+        output = pd.concat([output, pd.read_csv(OUTPUT)])
+    for repo in os.listdir(OUTPUT_FOLDER):
+        output = pd.concat([output, pd.read_csv(OUTPUT_FOLDER + repo)])
+        os.remove(OUTPUT_FOLDER + repo)
 
-# Loop através de cada linha do dataframe
-for indice, linha in dataframe.iterrows():
-    # Extrai a coluna "url" da linha atual
-    url = linha['URL']
-    print(url)
+    output = output.drop_duplicates()
+    output = output.sort_values(by='stargazers', ascending=False)
 
-    # Clona o repositório com base na URL usando o comando git clone
-    os.system('git clone ' + url + '.git ' + caminho_destino)
+    output.to_csv(OUTPUT, index=False)
+
+    log_print('Finalizado')
